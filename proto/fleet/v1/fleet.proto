@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package fleet.v1;
+
+option go_package = "fleettracker/gen/fleet/v1;fleetv1";
+
+// One delivery job.
+message Trip {
+  string trip_id          = 1;
+  string driver_id        = 2;
+  string pickup_address   = 3;
+  string dropoff_address  = 4;
+}
+
+// What the caller sends. The server makes the trip id.
+message CreateTripRequest {
+  string driver_id        = 1;
+  string pickup_address   = 2;
+  string dropoff_address  = 3;
+}
+
+// What the caller gets back.
+message CreateTripResponse {
+  Trip trip = 1;
+}
+
+message GetTripRequest {
+  string trip_id       = 1;
+}
+
+message GetTripResponse {
+  Trip trip      = 1;
+}
+
+service FleetService {
+  rpc CreateTrip(CreateTripRequest) returns (CreateTripResponse);
+  rpc GetTrip(GetTripRequest) returns (GetTripResponse);
+}
+
+
