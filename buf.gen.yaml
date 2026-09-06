@@ -1,0 +1,10 @@
+version: v2
+plugins:
+  # makes Go structs from the messages
+  - local: protoc-gen-go
+    out: gen
+    opt: paths=source_relative
+  # makes the Go client and server from the service
+  - local: protoc-gen-go-grpc
+    out: gen
+    opt: paths=source_relative
