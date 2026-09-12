@@ -26,7 +26,7 @@ type ZoneEvent struct{ //field name must start with capital letter, in GO lowerc
 const (
 	zoneLat    = 28.635
 	zoneLng    = 77.225
-	zoneRadius = 8000 // metres
+	zoneRadius = 2500 // metres
 )
 
 // Metres per degree near Delhi. Flat-earth maths, fine over a few km.
@@ -93,10 +93,27 @@ func main() {
 			log.Printf("never seen %s", driverId)
 		case isInside && !wasInside:
 			log.Printf("Arrived %s",driverId)
+			ev := ZoneEvent{
+				DriverId: driverId,
+				EventType: "arrived",
+				TimestampMs: ping.GetTimestampMs(),
+			}
+			payload, err := json.Marshal(ev)
+			if err != nil{
+				log.Printf("marshal zone event: %v", err)
+				continue
+			}
+			if err := events.WriteMessages(ctx, kafka.Message{
+				Key: []byte(driverId),
+				Value: payload,
+			}); err != nil {
+				log.Printf("publish zone event: %v", err)
+			}
+			
 		case !isInside && wasInside:
 			log.Printf("Departed %s", driverId)
 			ev := ZoneEvent{
-				DriverId: "driverId",
+				DriverId: driverId,
 				EventType: "departed",
 				TimestampMs: ping.GetTimestampMs(),
 			}
