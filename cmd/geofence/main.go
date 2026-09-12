@@ -22,6 +22,10 @@ type ZoneEvent struct{ //field name must start with capital letter, in GO lowerc
 	TimestampMs int64 `json:"ts_ms"`
 }
 
+type DriverState struct{
+	Inside bool `json:"inside"`
+}
+
 // One hardcoded zone, sat in the middle of where the simulator scatters drivers.
 const (
 	zoneLat    = 28.635
@@ -50,6 +54,7 @@ func main() {
 		Topic:       "location.pings",
 		GroupID:     "geofence",
 		StartOffset: kafka.FirstOffset,
+		//Logger:      kafka.LoggerFunc(log.Printf),		
 		ErrorLogger: kafka.LoggerFunc(log.Printf),
 	})
 	defer reader.Close()
@@ -62,6 +67,16 @@ func main() {
 		BatchTimeout: 10 * time.Millisecond,
 	}
 	defer events.Close()
+
+	state := &kafka.Writer{
+		Addr: kafka.TCP("127.0.0.1:9092"),
+		Topic: "geofence.state",
+		Balancer:     &kafka.Hash{},
+		RequiredAcks: kafka.RequireAll,
+		BatchTimeout: 10 * time.Millisecond,
+	}
+	defer state.Close()
+	
 	
 	log.Println("geofence started")
 
@@ -87,7 +102,24 @@ func main() {
 
 		wasInside, ok := m[driverId] //read from map
 		m[driverId] = isInside
-		
+
+		// variable for storing the each entry of map into new kafka topic: geofence.state
+		st := DriverState{
+			Inside: isInside,
+		}
+		payload, err := json.Marshal(st)
+		if err != nil{
+			log.Printf("marshal state: %v", err)
+			continue
+		}
+		//publish the values
+		if err := state.WriteMessages(ctx, kafka.Message{
+			Key: []byte(driverId),
+			Value: payload,
+		}); err != nil {
+			log.Printf("publish state: %v", err)
+		}
+
 		switch {
 		case !ok:
 			log.Printf("never seen %s", driverId)
