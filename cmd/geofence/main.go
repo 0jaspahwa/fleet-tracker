@@ -6,12 +6,21 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"time"
+	"encoding/json"
 
 	fleetv1 "fleettracker/gen/fleet/v1"
 
 	"github.com/segmentio/kafka-go"
 	"google.golang.org/protobuf/encoding/protojson"
 )
+
+
+type ZoneEvent struct{ //field name must start with capital letter, in GO lowercase name is unexported
+	DriverId string `json:"driver_id"`
+	EventType string `json:"event"`
+	TimestampMs int64 `json:"ts_ms"`
+}
 
 // One hardcoded zone, sat in the middle of where the simulator scatters drivers.
 const (
@@ -45,6 +54,15 @@ func main() {
 	})
 	defer reader.Close()
 
+	events := &kafka.Writer{
+		Addr: kafka.TCP("127.0.0.1:9092"),
+		Topic: "zone.events",
+		Balancer: &kafka.Hash{},
+		RequiredAcks: kafka.RequireAll,
+		BatchTimeout: 10 * time.Millisecond,
+	}
+	defer events.Close()
+	
 	log.Println("geofence started")
 
 	// create map to store the drivers(inside or outside the zone)
@@ -77,6 +95,22 @@ func main() {
 			log.Printf("Arrived %s",driverId)
 		case !isInside && wasInside:
 			log.Printf("Departed %s", driverId)
+			ev := ZoneEvent{
+				DriverId: "driverId",
+				EventType: "departed",
+				TimestampMs: ping.GetTimestampMs(),
+			}
+			payload, err := json.Marshal(ev)
+			if err != nil {
+				log.Printf("marshal zone event: %v", err)
+				continue
+			}
+			if err := events.WriteMessages(ctx, kafka.Message{
+				Key: []byte(driverId),
+				Value: payload,
+			}); err != nil {
+				log.Printf("publish zone event: %v", err)
+			}
 		}
 		//log.Printf("%s  %v %v  %v %.0fm from zone", ping.GetDriverId(), wasInside, isInside, ok, d)
 
