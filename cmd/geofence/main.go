@@ -45,6 +45,54 @@ func distanceToZone(lat, lng float64) float64 {
 	return math.Hypot(dLat, dLng)
 }
 
+// func to create map again from the topic->geofence.state 
+func restoreState() map[string]bool {
+	m := make(map[string]bool)
+
+	for p := 0; p<6; p++{
+		conn, err := kafka.DialLeader(context.Background(),"tcp", "127.0.0.1:9092", "geofence.state", p) //connects to the broker, leads the partition
+		if err != nil {
+			log.Printf("dial partition %d: %v", p, err)
+			continue
+		}
+
+		last, err := conn.ReadLastOffset() //one request to the broker asking where the partition ends
+		if err != nil {
+			log.Printf("dial partition %d: %v") //dial partition 3: connection refused
+			conn.Close()
+			continue
+		}
+
+		if _, err := conn.Seek(0, kafka.SeekStart); err != nil {
+			log.Printf("seek partition %d: %v", p, err)
+			conn.Close()
+			continue
+		}
+
+		batch := conn.ReadBatch(1, 10e6)
+		for{
+			msg, err := batch.ReadMessage()
+			if err != nil {
+				break
+			}
+			var st DriverState
+			if err := json.Unmarshal(msg.Value, &st); err != nil {
+				continue
+			}
+			m[string(msg.Key)] = st.Inside
+
+			if msg.Offset >= last-1 {
+				break
+			}
+		}
+		
+		batch.Close()
+		conn.Close()
+
+	}
+	return m
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -80,9 +128,12 @@ func main() {
 	
 	log.Println("geofence started")
 
-	// create map to store the drivers(inside or outside the zone)
-	m := make(map[string]bool)
+	//call the function check watermark to build again the map
 
+
+	// create map to store the drivers(inside or outside the zone)
+		m := restoreState()
+		log.Printf("restored %d drivers", len(m))
 
 	for {
 		msg, err := reader.FetchMessage(ctx)
