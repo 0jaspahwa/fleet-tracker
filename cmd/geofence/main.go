@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"math"
 	"os"
 	"os/signal"
 	"time"
-	"encoding/json"
 
 	fleetv1 "fleettracker/gen/fleet/v1"
 
@@ -15,14 +15,13 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
-
-type ZoneEvent struct{ //field name must start with capital letter, in GO lowercase name is unexported
-	DriverId string `json:"driver_id"`
-	EventType string `json:"event"`
-	TimestampMs int64 `json:"ts_ms"`
+type ZoneEvent struct { //field name must start with capital letter, in GO lowercase name is unexported
+	DriverId    string `json:"driver_id"`
+	EventType   string `json:"event"`
+	TimestampMs int64  `json:"ts_ms"`
 }
 
-type DriverState struct{
+type DriverState struct {
 	Inside bool `json:"inside"`
 }
 
@@ -45,12 +44,12 @@ func distanceToZone(lat, lng float64) float64 {
 	return math.Hypot(dLat, dLng)
 }
 
-// func to create map again from the topic->geofence.state 
+// func to create map again from the topic->geofence.state
 func restoreState() map[string]bool {
 	m := make(map[string]bool)
 
-	for p := 0; p<6; p++{
-		conn, err := kafka.DialLeader(context.Background(),"tcp", "127.0.0.1:9092", "geofence.state", p) //connects to the broker, leads the partition
+	for p := 0; p < 6; p++ {
+		conn, err := kafka.DialLeader(context.Background(), "tcp", "127.0.0.1:9092", "geofence.state", p) //connects to the broker, leads the partition
 		if err != nil {
 			log.Printf("dial partition %d: %v", p, err)
 			continue
@@ -70,7 +69,7 @@ func restoreState() map[string]bool {
 		}
 
 		batch := conn.ReadBatch(1, 10e6)
-		for{
+		for {
 			msg, err := batch.ReadMessage()
 			if err != nil {
 				break
@@ -85,7 +84,7 @@ func restoreState() map[string]bool {
 				break
 			}
 		}
-		
+
 		batch.Close()
 		conn.Close()
 
@@ -97,43 +96,41 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-		reader := kafka.NewReader(kafka.ReaderConfig{
+	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     []string{"127.0.0.1:9092"},
 		Topic:       "location.pings",
 		GroupID:     "geofence",
 		StartOffset: kafka.FirstOffset,
-		//Logger:      kafka.LoggerFunc(log.Printf),		
+		//Logger:      kafka.LoggerFunc(log.Printf),
 		ErrorLogger: kafka.LoggerFunc(log.Printf),
 	})
 	defer reader.Close()
 
 	events := &kafka.Writer{
-		Addr: kafka.TCP("127.0.0.1:9092"),
-		Topic: "zone.events",
-		Balancer: &kafka.Hash{},
+		Addr:         kafka.TCP("127.0.0.1:9092"),
+		Topic:        "zone.events",
+		Balancer:     &kafka.Hash{},
 		RequiredAcks: kafka.RequireAll,
 		BatchTimeout: 10 * time.Millisecond,
 	}
 	defer events.Close()
 
 	state := &kafka.Writer{
-		Addr: kafka.TCP("127.0.0.1:9092"),
-		Topic: "geofence.state",
+		Addr:         kafka.TCP("127.0.0.1:9092"),
+		Topic:        "geofence.state",
 		Balancer:     &kafka.Hash{},
 		RequiredAcks: kafka.RequireAll,
 		BatchTimeout: 10 * time.Millisecond,
 	}
 	defer state.Close()
-	
-	
+
 	log.Println("geofence started")
 
 	//call the function check watermark to build again the map
 
-
 	// create map to store the drivers(inside or outside the zone)
-		m := restoreState()
-		log.Printf("restored %d drivers", len(m))
+	m := restoreState()
+	log.Printf("restored %d drivers", len(m))
 
 	for {
 		msg, err := reader.FetchMessage(ctx)
@@ -155,49 +152,33 @@ func main() {
 		m[driverId] = isInside
 
 		// variable for storing the each entry of map into new kafka topic: geofence.state
-		st := DriverState{
-			Inside: isInside,
-		}
-		payload, err := json.Marshal(st)
-		if err != nil{
-			log.Printf("marshal state: %v", err)
-			continue
-		}
-		//publish the values
-		if err := state.WriteMessages(ctx, kafka.Message{
-			Key: []byte(driverId),
-			Value: payload,
-		}); err != nil {
-			log.Printf("publish state: %v", err)
+
+		if !ok || isInside != wasInside {
+			st := DriverState{
+				Inside: isInside,
+			}
+			payload, err := json.Marshal(st)
+			if err != nil {
+				log.Printf("marshal state: %v", err)
+				continue
+			}
+			//publish the values
+			if err := state.WriteMessages(ctx, kafka.Message{
+				Key:   []byte(driverId),
+				Value: payload,
+			}); err != nil {
+				log.Printf("publish state: %v", err)
+			}
 		}
 
 		switch {
 		case !ok:
 			log.Printf("never seen %s", driverId)
 		case isInside && !wasInside:
-			log.Printf("Arrived %s",driverId)
+			log.Printf("Arrived %s", driverId)
 			ev := ZoneEvent{
-				DriverId: driverId,
-				EventType: "arrived",
-				TimestampMs: ping.GetTimestampMs(),
-			}
-			payload, err := json.Marshal(ev)
-			if err != nil{
-				log.Printf("marshal zone event: %v", err)
-				continue
-			}
-			if err := events.WriteMessages(ctx, kafka.Message{
-				Key: []byte(driverId),
-				Value: payload,
-			}); err != nil {
-				log.Printf("publish zone event: %v", err)
-			}
-			
-		case !isInside && wasInside:
-			log.Printf("Departed %s", driverId)
-			ev := ZoneEvent{
-				DriverId: driverId,
-				EventType: "departed",
+				DriverId:    driverId,
+				EventType:   "arrived",
 				TimestampMs: ping.GetTimestampMs(),
 			}
 			payload, err := json.Marshal(ev)
@@ -206,7 +187,26 @@ func main() {
 				continue
 			}
 			if err := events.WriteMessages(ctx, kafka.Message{
-				Key: []byte(driverId),
+				Key:   []byte(driverId),
+				Value: payload,
+			}); err != nil {
+				log.Printf("publish zone event: %v", err)
+			}
+
+		case !isInside && wasInside:
+			log.Printf("Departed %s", driverId)
+			ev := ZoneEvent{
+				DriverId:    driverId,
+				EventType:   "departed",
+				TimestampMs: ping.GetTimestampMs(),
+			}
+			payload, err := json.Marshal(ev)
+			if err != nil {
+				log.Printf("marshal zone event: %v", err)
+				continue
+			}
+			if err := events.WriteMessages(ctx, kafka.Message{
+				Key:   []byte(driverId),
 				Value: payload,
 			}); err != nil {
 				log.Printf("publish zone event: %v", err)
