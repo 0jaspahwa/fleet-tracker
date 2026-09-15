@@ -4,7 +4,7 @@ import (
 	"context"
 	//"encoding/json"
 	"log"
-	//"math"
+	"math"
 	"os"
 	"os/signal"
 	//"time"
@@ -25,6 +25,22 @@ type Point struct {
 
 // window size for slicing
 const windowSize = 5
+
+const (
+	metresPerLat = 111320.0
+	metresPerLng = 97700.0
+)
+
+//func to calculate the distance between newest and oldest coordinates of the driver
+func distanceBetween(lat1, lng1, lat2, lng2 float64) float64{
+	dLat := (lat1 - lat2) * metresPerLat
+	dLng := (lng1 - lng2) * metresPerLng
+	return math.Hypot(dLat, dLng)
+}
+
+func timeBetween(oldMs, newMs int64) int64{
+	return newMs - oldMs
+}
 
 
 func main(){
@@ -64,6 +80,7 @@ func main(){
 		longitude := ping.GetLongitude()
 
 
+
 		pt := Point{
 			Latitude:    latitude,
 			Longitude:   longitude,
@@ -77,14 +94,28 @@ func main(){
 		if len(m[driverId]) > windowSize{
 			m[driverId] = m[driverId][1:] //takes the slice from index 1 to the end
 		}
-		log.Printf("%s has %d points", driverId, len(m[driverId]))
+		//distance of the points
+		pts := m[driverId]
+		if len(pts) >= 2{
+			oldest := pts[0]
+			newest := pts[len(pts)-1]
 
+			// for distance
+			d := distanceBetween(oldest.Latitude, oldest.Longitude, newest.Latitude, newest.Longitude)
+
+			//for time
+			t := timeBetween(oldest.TimestampMs, newest.TimestampMs);
+			tSeconds := float64(t)/1000
+
+			//speed
+			speed := d / tSeconds
+			log.Printf("%s has %.0f distance %d ms elasped %.0f speed", driverId, d, t, speed)
+		}
+		
 		if err := reader.CommitMessages(ctx, msg); err != nil {
 			log.Printf("commit failed: %v", err)
 		}
 	}
 	
-
-
 
 }
