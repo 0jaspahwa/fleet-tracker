@@ -99,7 +99,14 @@ func main(){
 
 			//speed
 			speed := d / tSeconds
-			log.Printf("%s has %.0f distance %d ms elasped %.0f speed", driverId, d, t, speed)
+
+			//remaining distance
+			rd := geo.DistanceToZone(newest.Latitude, newest.Longitude)
+
+			//seconds to arrive
+			sa:= rd/speed
+			log.Printf("%s speed %.0f m/s, %.0f m remaining, eta %.0f sec", driverId, speed, rd, sa)
+			//log.Printf("%s has %.0f distance %d ms elasped %.0f speed", driverId, d, t, speed)
 		}
 		
 		if err := reader.CommitMessages(ctx, msg); err != nil {
