@@ -4,12 +4,13 @@ import (
 	"context"
 	//"encoding/json"
 	"log"
-	"math"
+	//"math"
 	"os"
 	"os/signal"
 	//"time"
 
 	fleetv1 "fleettracker/gen/fleet/v1"
+	"fleettracker/internal/geo"
 
 	"github.com/segmentio/kafka-go"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -26,17 +27,6 @@ type Point struct {
 // window size for slicing
 const windowSize = 5
 
-const (
-	metresPerLat = 111320.0
-	metresPerLng = 97700.0
-)
-
-//func to calculate the distance between newest and oldest coordinates of the driver
-func distanceBetween(lat1, lng1, lat2, lng2 float64) float64{
-	dLat := (lat1 - lat2) * metresPerLat
-	dLng := (lng1 - lng2) * metresPerLng
-	return math.Hypot(dLat, dLng)
-}
 
 func timeBetween(oldMs, newMs int64) int64{
 	return newMs - oldMs
@@ -101,7 +91,7 @@ func main(){
 			newest := pts[len(pts)-1]
 
 			// for distance
-			d := distanceBetween(oldest.Latitude, oldest.Longitude, newest.Latitude, newest.Longitude)
+			d := geo.DistanceBetween(oldest.Latitude, oldest.Longitude, newest.Latitude, newest.Longitude)
 
 			//for time
 			t := timeBetween(oldest.TimestampMs, newest.TimestampMs);

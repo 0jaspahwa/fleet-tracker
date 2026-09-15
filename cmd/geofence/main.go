@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"log"
-	"math"
+	//"math"
 	"os"
 	"os/signal"
 	"time"
 
 	fleetv1 "fleettracker/gen/fleet/v1"
+	"fleettracker/internal/geo"
 
 	"github.com/segmentio/kafka-go"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -25,24 +26,9 @@ type DriverState struct {
 	Inside bool `json:"inside"`
 }
 
-// One hardcoded zone, sat in the middle of where the simulator scatters drivers.
-const (
-	zoneLat    = 28.635
-	zoneLng    = 77.225
-	zoneRadius = 2500 // metres
-)
 
-// Metres per degree near Delhi. Flat-earth maths, fine over a few km.
-const (
-	metresPerLat = 111320.0
-	metresPerLng = 97700.0
-)
 
-func distanceToZone(lat, lng float64) float64 {
-	dLat := (lat - zoneLat) * metresPerLat
-	dLng := (lng - zoneLng) * metresPerLng
-	return math.Hypot(dLat, dLng)
-}
+
 
 // func to create map again from the topic->geofence.state
 func restoreState() map[string]bool {
@@ -145,14 +131,15 @@ func main() {
 			continue
 		}
 		driverId := ping.GetDriverId() //get driver id and store it in map
-		d := distanceToZone(ping.GetLatitude(), ping.GetLongitude())
-		isInside := d <= zoneRadius
+		d := geo.DistanceToZone(ping.GetLatitude(), ping.GetLongitude())
+		isInside := d <= geo.ZoneRadius
 
 		wasInside, ok := m[driverId] //read from map
 		m[driverId] = isInside
 
 		// variable for storing the each entry of map into new kafka topic: geofence.state
 
+		//only push the ping when the states changes
 		if !ok || isInside != wasInside {
 			st := DriverState{
 				Inside: isInside,
