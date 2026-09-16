@@ -101,11 +101,19 @@ func main(){
 			speed := d / tSeconds
 
 			//remaining distance
-			rd := geo.DistanceToZone(newest.Latitude, newest.Longitude)
+			rdnew := geo.DistanceToZone(newest.Latitude, newest.Longitude)
+			rdold := geo.DistanceToZone(oldest.Latitude, oldest.Longitude)
+
+			if rdnew < rdold{
+				sa := rdnew / speed
+				log.Printf("%s speed %.0f m/s, %.0f m remaining, eta %.0f sec", driverId, speed, rdnew, sa)
+			} else {
+				log.Printf("%s speed %.0f m/s, %.0f m remaining, moving away", driverId, speed, rdnew)
+			}
 
 			//seconds to arrive
-			sa:= rd/speed
-			log.Printf("%s speed %.0f m/s, %.0f m remaining, eta %.0f sec", driverId, speed, rd, sa)
+			//sa:= rd/speed
+			//log.Printf("%s speed %.0f m/s, %.0f m remaining, eta %.0f sec", driverId, speed, rd, sa)
 			//log.Printf("%s has %.0f distance %d ms elasped %.0f speed", driverId, d, t, speed)
 		}
 		
