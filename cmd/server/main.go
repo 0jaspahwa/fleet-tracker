@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"time"
@@ -20,7 +21,8 @@ import (
 // Our server. The embedded struct is required by the generated code.
 type server struct {
 	fleetv1.UnimplementedFleetServiceServer
-	events *kafka.Writer
+	events *kafka.Writer // trip.created
+	pings  *kafka.Writer // location.pings
 }
 
 func (s *server) CreateTrip(
@@ -56,9 +58,91 @@ func (s *server) CreateTrip(
 	return &fleetv1.CreateTripResponse{Trip: trip}, nil
 }
 
+
+// The driver holds one connection open and pushes pings down it.
+// We read until they hang up, then reply once with a summary.
+func (s *server) StreamLocation(
+	stream grpc.ClientStreamingServer[fleetv1.StreamLocationRequest, fleetv1.StreamLocationResponse],
+) error {
+
+	start := time.Now()
+	var count int32
+
+	for {
+		ping, err := stream.Recv()
+
+		if err == io.EOF {
+			// Driver closed the stream cleanly. Send the summary and finish.
+			log.Printf("StreamLocation  ended  pings=%d", count)
+			return stream.SendAndClose(&fleetv1.StreamLocationResponse{
+				PingsReceived: count,
+				DurationMs:    time.Since(start).Milliseconds(),
+			})
+		}
+		if err != nil {
+			// Driver vanished mid-shift. Not clean, but not our bug.
+			log.Printf("StreamLocation  broke after %d pings: %v", count, err)
+			return err
+		}
+
+		payload, err := protojson.Marshal(ping)
+		if err != nil {
+			return status.Errorf(codes.Internal, "encode ping: %v", err)
+		}
+
+		// Same keying rule. All of one driver's pings land on one partition.
+		err = s.pings.WriteMessages(stream.Context(), kafka.Message{
+			Key:   []byte(ping.GetDriverId()),
+			Value: payload,
+		})
+		if err != nil {
+			return status.Errorf(codes.Unavailable, "publish ping: %v", err)
+		}
+
+		count++
+	}
+}
+
+func (s *server) WatchTrip(
+	req *fleetv1.WatchTripRequest,
+	stream grpc.ServerStreamingServer[fleetv1.WatchTripResponse],
+) error {
+	tripID := req.GetTripId()
+	log.Printf("WatchTrip started trip_id%s", tripID)
+
+	lat := 28.61
+	lng := 77.20
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stream.Context().Done():
+			log.Printf("WatchTrip  ended  trip_id=%s", tripID)
+			return nil
+
+		case <-ticker.C:
+			lat += 0.0005
+			lng += 0.0003
+
+			err := stream.Send(&fleetv1.WatchTripResponse{
+				TripId:      tripID,
+				Latitude:    lat,
+				Longitude:   lng,
+				TimestampMs: time.Now().UnixMilli(),
+			})
+			if err != nil {
+				log.Printf("WatchTrip  send failed  trip_id=%s: %v", tripID, err)
+				return err
+			}
+		}
+	}
+}
+
 func main() {
 	writer := &kafka.Writer{
-		Addr:  kafka.TCP("localhost:9092"),
+		Addr:  kafka.TCP("127.0.0.1:9092"),
 		Topic: "trip.created",
 		// Pick the partition from the key.
 		Balancer: &kafka.Hash{},
@@ -69,13 +153,22 @@ func main() {
 	}
 	defer writer.Close()
 
+	pings := &kafka.Writer{
+		Addr:         kafka.TCP("127.0.0.1:9092"),
+		Topic:        "location.pings",
+		Balancer:     &kafka.Hash{},
+		RequiredAcks: kafka.RequireAll,
+		BatchTimeout: 10 * time.Millisecond,
+	}
+	defer pings.Close()
+
 	lis, err := net.Listen("tcp", ":50051")
 	if err != nil {
 		log.Fatalf("listen: %v", err)
 	}
 
 	s := grpc.NewServer()
-	fleetv1.RegisterFleetServiceServer(s, &server{events: writer})
+	fleetv1.RegisterFleetServiceServer(s, &server{events: writer, pings: pings})
 
 	// Lets tools ask what this server can do, so they do not need the proto file.
 	reflection.Register(s)
