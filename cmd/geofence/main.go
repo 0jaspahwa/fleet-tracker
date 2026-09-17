@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"time"
+	"sync"
 
 	fleetv1 "fleettracker/gen/fleet/v1"
 	"fleettracker/internal/geo"
@@ -31,13 +32,13 @@ type DriverState struct {
 
 
 // func to create map again from the topic->geofence.state
-func restoreState() map[string]bool {
+func restoreState(partitions []int) map[string]bool {
 	m := make(map[string]bool)
 
-	for p := 0; p < 6; p++ {
+	for _, p := range partitions {
 		conn, err := kafka.DialLeader(context.Background(), "tcp", "127.0.0.1:9092", "geofence.state", p) //connects to the broker, leads the partition
 		if err != nil {
-			log.Printf("dial partition %d: %v", p, err)
+			log.Printf("read last offset partition %d: %v", p, err)
 			continue
 		}
 
@@ -82,15 +83,20 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:     []string{"127.0.0.1:9092"},
-		Topic:       "location.pings",
-		GroupID:     "geofence",
-		StartOffset: kafka.FirstOffset,
-		//Logger:      kafka.LoggerFunc(log.Printf),
+	//instead of kafka.Reader 
+	// changed it to consumerGroup which is a low level call then .Reader allows to see the partition
+	group, err := kafka.NewConsumerGroup(kafka.ConsumerGroupConfig{
+		ID:      "geofence",
+		Brokers: []string{"127.0.0.1:9092"},
+		Topics:  []string{"location.pings"},
+		//Logger:  kafka.LoggerFunc(log.Printf),
 		ErrorLogger: kafka.LoggerFunc(log.Printf),
 	})
-	defer reader.Close()
+	if err != nil {
+		log.Fatalf("create consumer group: %v", err)
+	}
+	
+	defer group.Close()
 
 	events := &kafka.Writer{
 		Addr:         kafka.TCP("127.0.0.1:9092"),
@@ -115,94 +121,131 @@ func main() {
 	//call the function check watermark to build again the map
 
 	// create map to store the drivers(inside or outside the zone)
-	m := restoreState()
-	log.Printf("restored %d drivers", len(m))
+	//m := restoreState()
+	//log.Printf("restored %d drivers", len(m))
+
+	
 
 	for {
-		msg, err := reader.FetchMessage(ctx)
+		gen, err := group.Next(ctx) //group.next is call gets whos in the group and which partitions u own
 		if err != nil {
 			log.Printf("stopping: %v", err)
 			return
 		}
 
-		var ping fleetv1.StreamLocationRequest
-		if err := protojson.Unmarshal(msg.Value, &ping); err != nil {
-			log.Printf("bad message p=%d offset=%d: %v", msg.Partition, msg.Offset, err)
-			continue
-		}
-		driverId := ping.GetDriverId() //get driver id and store it in map
-		d := geo.DistanceToZone(ping.GetLatitude(), ping.GetLongitude())
-		isInside := d <= geo.ZoneRadius
+		log.Printf("generation %d assigned: %v", gen.ID, gen.Assignments["location.pings"])
 
-		wasInside, ok := m[driverId] //read from map
-		m[driverId] = isInside
-
-		// variable for storing the each entry of map into new kafka topic: geofence.state
-
-		//only push the ping when the states changes
-		if !ok || isInside != wasInside {
-			st := DriverState{
-				Inside: isInside,
-			}
-			payload, err := json.Marshal(st)
-			if err != nil {
-				log.Printf("marshal state: %v", err)
-				continue
-			}
-			//publish the values
-			if err := state.WriteMessages(ctx, kafka.Message{
-				Key:   []byte(driverId),
-				Value: payload,
-			}); err != nil {
-				log.Printf("publish state: %v", err)
-			}
+		// restores the drivers according to there partitions
+		var partitions []int
+		//assignment is kafka telling one member of group: u own this partition
+		for _, a := range gen.Assignments["location.pings"]{ // each assignment is a struct with .Partition and .Offset
+			//to read the messages
+			partitions = append(partitions, a.ID)
 		}
 
-		switch {
-		case !ok:
-			log.Printf("never seen %s", driverId)
-		case isInside && !wasInside:
-			log.Printf("Arrived %s", driverId)
-			ev := ZoneEvent{
-				DriverId:    driverId,
-				EventType:   "arrived",
-				TimestampMs: ping.GetTimestampMs(),
-			}
-			payload, err := json.Marshal(ev)
-			if err != nil {
-				log.Printf("marshal zone event: %v", err)
-				continue
-			}
-			if err := events.WriteMessages(ctx, kafka.Message{
-				Key:   []byte(driverId),
-				Value: payload,
-			}); err != nil {
-				log.Printf("publish zone event: %v", err)
-			}
+		m:= restoreState(partitions)
+		var mu sync.Mutex
+		log.Printf("generation %d restored %d drivers for partitions %v", gen.ID, len(m), partitions)
 
-		case !isInside && wasInside:
-			log.Printf("Departed %s", driverId)
-			ev := ZoneEvent{
-				DriverId:    driverId,
-				EventType:   "departed",
-				TimestampMs: ping.GetTimestampMs(),
-			}
-			payload, err := json.Marshal(ev)
-			if err != nil {
-				log.Printf("marshal zone event: %v", err)
-				continue
-			}
-			if err := events.WriteMessages(ctx, kafka.Message{
-				Key:   []byte(driverId),
-				Value: payload,
-			}); err != nil {
-				log.Printf("publish zone event: %v", err)
-			}
-		}
-		//log.Printf("%s  %v %v  %v %.0fm from zone", ping.GetDriverId(), wasInside, isInside, ok, d)
+		for _, a := range gen.Assignments["location.pings"]{
+			partition, offset := a.ID, a.Offset
 
-		if err := reader.CommitMessages(ctx, msg); err != nil {
-			log.Printf("commit failed: %v", err)
-		}
+			//start a go routine with lock (each go routine for each partition) 
+			gen.Start(func(ctx context.Context){
+				reader := kafka.NewReader(kafka.ReaderConfig{
+					Brokers: []string{"127.0.0.1:9092"},
+					Topic: "location.pings",
+					Partition: partition,
+				})
+				defer reader.Close()
+				reader.SetOffset(offset)
+
+				for {
+					msg, err := reader.FetchMessage(ctx)
+					if err != nil{
+						return
+					}
+
+					var ping fleetv1.StreamLocationRequest
+					if err := protojson.Unmarshal(msg.Value, &ping); err != nil {
+						log.Printf("bad message p=%d offset=%d: %v", msg.Partition, msg.Offset, err)
+						continue
+					}
+
+					driverID := ping.GetDriverId()
+					d := geo.DistanceToZone(ping.GetLatitude(),ping.GetLongitude())
+					isInside := d <= geo.ZoneRadius
+					
+					//when multiple go routines write to a map, we have to do this using lock then
+					mu.Lock()
+					wasInside, ok := m[driverID]
+					m[driverID] = isInside
+					mu.Unlock()
+
+					if !ok || isInside != wasInside {
+						st := DriverState{Inside: isInside}
+						payload, err := json.Marshal(st)
+						if err != nil {
+							log.Printf("marshal state: %v", err)
+							continue
+						}
+						if err := state.WriteMessages(ctx, kafka.Message{
+							Key:   []byte(driverID),
+							Value: payload,
+						}); err != nil {
+							log.Printf("publish state: %v", err)
+						}
+					}
+
+					switch {
+					case !ok:
+						log.Printf("never seen %s", driverID)
+					case isInside && !wasInside:
+						log.Printf("Arrived %s", driverID)
+						ev := ZoneEvent{
+							DriverId:    driverID,
+							EventType:   "arrived",
+							TimestampMs: ping.GetTimestampMs(),
+						}
+						payload, err := json.Marshal(ev)
+						if err != nil {
+							log.Printf("marshal zone event: %v", err)
+							continue
+						}
+						if err := events.WriteMessages(ctx, kafka.Message{
+							Key:   []byte(driverID),
+							Value: payload,
+						}); err != nil {
+							log.Printf("publish zone event: %v", err)
+						}
+
+					case !isInside && wasInside:
+						log.Printf("Departed %s", driverID)
+						ev := ZoneEvent{
+							DriverId:    driverID,
+							EventType:   "departed",
+							TimestampMs: ping.GetTimestampMs(),
+						}
+						payload, err := json.Marshal(ev)
+						if err != nil {
+							log.Printf("marshal zone event: %v", err)
+							continue
+						}
+						if err := events.WriteMessages(ctx, kafka.Message{
+							Key:   []byte(driverID),
+							Value: payload,
+						}); err != nil {
+							log.Printf("publish zone event: %v", err)
+						}
+					}
+
+					//as go routines have no groupID, they are plain partitions readers no membership no offset tracking, they cant commit
+					gen.CommitOffsets(map[string]map[int]int64{  //opic name → partition number → offset.
+						"location.pings": {partition: msg.Offset +1},
+					})
+				}
+			}) 
+
+		}	
 	}
 }
